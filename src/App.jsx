@@ -5,6 +5,10 @@ import {
   ChevronDown, Link2, Trash2, Pencil, Filter, UserPlus, ThumbsUp, CalendarPlus, AlertTriangle,
   Share2, ChevronLeft, Archive, Copy, Users, Camera, LogIn, LogOut, RotateCcw,
 } from "lucide-react";
+import { auth, googleProvider } from "./firebase";
+import { signInWithPopup, signOut as fbSignOut, onAuthStateChanged } from "firebase/auth";
+import { db } from "./firebase";
+import { collection, doc, setDoc, deleteDoc, onSnapshot, runTransaction } from "firebase/firestore";
 
 /* ------------------------------------------------------------------ *
  * "Vacances des copains" — prototype à données simulées (en mémoire).
@@ -17,7 +21,7 @@ import {
 
 /* ⚠️ À REMPLACER : e-mails des organisateur·rices autorisé·es à créer
    des voyages. (Tu avais mentionné une liste — colle-la ici.) */
-const ADMIN_EMAILS = ["anais@gmail.com"];
+const ADMIN_EMAILS = ["jaussaud.anais@gmail.com"];
 
 /* Comptes Google factices pour tester le parcours de connexion. */
 const MOCK_ACCOUNTS = [
@@ -154,22 +158,24 @@ function Avatar({ member, size = 30, className = "" }) {
  * ================================================================== */
 export default function VacancesCopains() {
   const [screen, setScreen] = useState("login"); // login | onboarding | home | create | invite | trip
-  const [session, setSession] = useState(null); // { uid, email }
-  const [trips, setTrips] = useState(() => [makeDemoTrip()]);
+  const [session, setSession] = useState(null); // { uid, email, googleName }
+const [trips, setTrips] = useState([]);
   const [activeId, setActiveId] = useState(null);
   const [pending, setPending] = useState(null); // id du voyage à rejoindre via un lien
 
   const isAdmin = !!session && ADMIN_EMAILS.includes(session.email);
   const me = session ? session.uid : null;
-  const acct = session ? MOCK_ACCOUNTS.find((a) => a.uid === session.uid) : null;
+  const acct = session ? (MOCK_ACCOUNTS.find((a) => a.uid === session.uid) || { uid: session.uid, email: session.email, googleName: session.googleName || session.email }) : null;
   const activeTrip = trips.find((t) => t.id === activeId) || null;
-
   const isMember = (trip) => !!trip && !!session && trip.members.some((m) => m.id === session.uid);
   const canSee = (trip) => isMember(trip) || (!!session && trip.ownerEmail === session.email);
-  const updateTrip = (id, fn) => setTrips((ts) => ts.map((t) => (t.id === id ? fn(t) : t)));
-
+const updateTrip = (id, fn) => {
+    setTrips((ts) => ts.map((t) => (t.id === id ? fn(t) : t)));
+    const current = trips.find((t) => t.id === id);
+    if (current) setDoc(doc(db, "trips", id), fn(current)).catch((e) => console.error("❌ Sauvegarde échouée :", e));
+  };
   const signIn = (account) => {
-    setSession({ uid: account.uid, email: account.email });
+    setSession({ uid: account.uid, email: account.email, googleName: account.googleName });
     if (pending) {
       const trip = trips.find((t) => t.id === pending);
       if (trip && trip.members.some((m) => m.id === account.uid)) { setActiveId(trip.id); setPending(null); setScreen("trip"); }
@@ -177,7 +183,49 @@ export default function VacancesCopains() {
       else { setPending(null); setScreen("home"); }
     } else setScreen("home");
   };
-  const signOut = () => { setSession(null); setActiveId(null); setScreen("login"); };
+
+  const signOut = () => { fbSignOut(auth); setActiveId(null); setScreen("login"); };
+
+  // Écoute la connexion Google réelle et déclenche la navigation
+  useEffect(() => {
+    const stop = onAuthStateChanged(auth, (user) => {
+      if (user) {
+        signIn({ uid: user.uid, email: user.email, googleName: user.displayName || user.email });
+      } else {
+        setSession(null);
+      }
+    });
+    return () => stop();
+  }, []);
+// Écoute la connexion Google réelle et déclenche la navigation
+  useEffect(() => {
+    const stop = onAuthStateChanged(auth, (user) => {
+      if (user) {
+        signIn({ uid: user.uid, email: user.email, googleName: user.displayName || user.email });
+      } else {
+        setSession(null);
+      }
+    });
+    return () => stop();
+  }, []);
+
+  // Lit tous les voyages depuis Firestore, en temps réel
+  useEffect(() => {
+    const stop = onSnapshot(collection(db, "trips"), (snap) => {
+      const list = snap.docs.map((d) => d.data());
+      setTrips(list);
+    }, (err) => console.error("Lecture des voyages échouée :", err));
+    return () => stop();
+  }, []);
+
+  const googleLogin = async () => {
+    try {
+      await signInWithPopup(auth, googleProvider);
+    } catch (e) {
+      console.error("Échec de connexion Google :", e);
+      alert("La connexion Google a échoué. Détail : " + (e && e.message ? e.message : e));
+    }
+  };
 
   const createTrip = ({ name, startDate, endDate }) => {
     const days = buildDays(startDate, endDate);
@@ -186,7 +234,9 @@ export default function VacancesCopains() {
       id: rid("trip-"), name, startDate, endDate, ownerEmail: session.email, inviteCode: newCode(), status: "active",
       tricountUrl: "", members: [owner], planning: emptyPlanning(days), activities: [], meals: emptyMeals(days), manual: [], checked: [], assignIng: {},
     };
-    setTrips((ts) => [...ts, trip]);
+    setDoc(doc(db, "trips", trip.id), trip)
+      .then(() => console.log("✅ Voyage écrit dans Firestore :", trip.id))
+      .catch((e) => console.error("❌ Écriture échouée :", e));
     setActiveId(trip.id);
     setScreen("onboarding"); // l'organisateur confirme aussi son profil
   };
@@ -204,7 +254,7 @@ export default function VacancesCopains() {
 
   let content;
   if (!session || screen === "login")
-    content = <Login pendingTrip={pending ? trips.find((t) => t.id === pending) : null} onSignIn={signIn} onCancelPending={() => setPending(null)} />;
+    content = <Login pendingTrip={pending ? trips.find((t) => t.id === pending) : null} onSignIn={signIn} onCancelPending={() => setPending(null)} onGoogle={googleLogin} />;
   else if (screen === "onboarding" && activeTrip)
     content = <Onboarding trip={activeTrip} account={acct} onDone={completeOnboarding} onCancel={() => { setScreen("home"); setPending(null); }} />;
   else if (screen === "create")
@@ -222,9 +272,8 @@ export default function VacancesCopains() {
 
   return <div className="vc-root"><style>{CSS}</style><div className="vc-phone">{content}</div></div>;
 }
-
 /* ------------------------------ Login ------------------------------ */
-function Login({ pendingTrip, onSignIn, onCancelPending }) {
+function Login({ pendingTrip, onSignIn, onCancelPending, onGoogle }) {
   const [choose, setChoose] = useState(false);
   return (
     <div className="vc-screen vc-login vc-fade">
@@ -239,10 +288,11 @@ function Login({ pendingTrip, onSignIn, onCancelPending }) {
           <button onClick={onCancelPending}>Annuler</button>
         </div>
       )}
+      <button className="vc-google-btn" onClick={onGoogle}><LogIn size={17} /> Continuer avec Google</button>
       {!choose ? (
-        <button className="vc-google-btn" onClick={() => setChoose(true)}><LogIn size={17} /> Continuer avec Google</button>
+        <button className="vc-ghostlink" onClick={() => setChoose(true)} style={{ marginTop: 12 }}>Comptes de démo (test)</button>
       ) : (
-        <div className="vc-acct-list">
+        <div className="vc-acct-list" style={{ marginTop: 12 }}>
           {MOCK_ACCOUNTS.map((a) => (
             <button key={a.uid} className="vc-acct" onClick={() => onSignIn(a)}>
               <Avatar member={{ name: a.googleName, color: acctColor(a.uid) }} size={38} />
@@ -252,11 +302,10 @@ function Login({ pendingTrip, onSignIn, onCancelPending }) {
           ))}
         </div>
       )}
-      <div className="vc-sim-note">Connexion simulée — aucune authentification Google réelle. Le branchement Firebase viendra ensuite.</div>
+      <div className="vc-sim-note">Connexion Google réelle via Firebase. Les « comptes de démo » servent uniquement aux tests.</div>
     </div>
   );
 }
-
 /* --------------------------- Onboarding ---------------------------- */
 function Onboarding({ trip, account, onDone, onCancel }) {
   const existing = trip.members.find((m) => m.email === account.email);
@@ -425,6 +474,39 @@ function TripApp({ trip, me, isOwner, update, onExit, onShare }) {
   const [tab, setTab] = useState("activites");
   const days = useMemo(() => buildDays(trip.startDate, trip.endDate), [trip.startDate, trip.endDate]);
   const members = trip.members;
+  // Activités en temps réel depuis Firestore (sous-collection du voyage)
+  const [fsActivities, setFsActivities] = useState([]);
+  useEffect(() => {
+    const ref = collection(db, "trips", trip.id, "activities");
+    const stop = onSnapshot(ref, (snap) => {
+      setFsActivities(snap.docs.map((d) => d.data()));
+    }, (e) => console.error("Lecture activités échouée :", e));
+    return () => stop();
+  }, [trip.id]);
+  // Écrit/mets à jour une activité (document séparé)
+  const saveActivityFS = (act) => {
+    return setDoc(doc(db, "trips", trip.id, "activities", act.id), act)
+      .catch((e) => console.error("Sauvegarde activité échouée :", e));
+  };
+  // Supprime une activité
+  const deleteActivityFS = (id) => {
+    return deleteDoc(doc(db, "trips", trip.id, "activities", id))
+      .catch((e) => console.error("Suppression activité échouée :", e));
+  };
+  // Vote sans écrasement : transaction sur l'activité seule
+  const toggleVoteFS = async (id, uid) => {
+    const ref = doc(db, "trips", trip.id, "activities", id);
+    try {
+      await runTransaction(db, async (tx) => {
+        const snap = await tx.get(ref);
+        if (!snap.exists()) return;
+        const data = snap.data();
+        const votes = data.votes || [];
+        const nv = votes.includes(uid) ? votes.filter((v) => v !== uid) : [...votes, uid];
+        tx.update(ref, { votes: nv });
+      });
+    } catch (e) { console.error("Vote échoué :", e); }
+  };
   // Horodatage de la dernière visite de cette personne (pour la section "Nouveau").
   // En mémoire, réinitialisé à chaque rechargement ; persistera via Firestore plus tard.
   const [seenAt] = useState(() => (trip.lastSeen && trip.lastSeen[me]) || 0);
@@ -438,8 +520,8 @@ function TripApp({ trip, me, isOwner, update, onExit, onShare }) {
   const setChecked = (v) => update((t) => ({ ...t, checked: apply(v, t.checked) }));
   const setAssignIng = (v) => update((t) => ({ ...t, assignIng: apply(v, t.assignIng) }));
 
-  const { planning, activities, meals, manual, checked, assignIng } = trip;
-
+const { planning, meals, manual, checked, assignIng } = trip;
+const activities = fsActivities;
   /* Pont Activités <-> Planning (partants pré-remplis avec les votes) */
   const rebuildLinked = (prev, act) => {
     let existing = null, existingDay = null;
@@ -460,18 +542,19 @@ function TripApp({ trip, me, isOwner, update, onExit, onShare }) {
   };
   const saveActivity = (act) => {
     let full;
-    if (act.id) { full = act; setActivities((a) => a.map((x) => (x.id === act.id ? act : x))); }
-    else { full = { ...act, id: "ac" + Date.now(), by: me, votes: [me], createdAt: Date.now() }; setActivities((a) => [...a, full]); }
-    setPlanning((prev) => rebuildLinked(prev, full));
+    if (act.id) { full = act; }
+    else { full = { ...act, id: "ac" + Date.now(), by: me, votes: [me], createdAt: Date.now() }; }
+    saveActivityFS(full);                         // écrit dans Firestore (l'affichage suit via l'écouteur)
+    setPlanning((prev) => rebuildLinked(prev, full)); // planning reste en mémoire pour l'instant
   };
-  const planActivity = (id, slot) => {
+ const planActivity = (id, slot) => {
     const act = activities.find((a) => a.id === id); if (!act) return;
     const full = { ...act, slot };
-    setActivities((a) => a.map((x) => (x.id === id ? full : x)));
-    setPlanning((prev) => rebuildLinked(prev, full));
+    saveActivityFS(full);                          // le créneau de l'activité est sauvegardé
+    setPlanning((prev) => rebuildLinked(prev, full)); // planning en mémoire pour l'instant
   };
   const deleteActivity = (id) => {
-    setActivities((a) => a.filter((x) => x.id !== id));
+    deleteActivityFS(id);
     setPlanning((prev) => { const np = {}; days.forEach((d) => (np[d.key] = (prev[d.key] || []).filter((i) => i.fromActivity !== id))); return np; });
   };
 
@@ -480,7 +563,7 @@ function TripApp({ trip, me, isOwner, update, onExit, onShare }) {
       <TripHeader trip={trip} members={members} days={days} isOwner={isOwner} onExit={onExit} onShare={onShare} />
       <main className="vc-main">
         {tab === "activites" && <Activites activities={activities} setActivities={setActivities} me={me} members={members} days={days} seenAt={seenAt}
-          saveActivity={saveActivity} planActivity={planActivity} deleteActivity={deleteActivity} />}
+          saveActivity={saveActivity} planActivity={planActivity} deleteActivity={deleteActivity} onToggleVote={toggleVoteFS} />}
         {tab === "planning" && <Planning planning={planning} setPlanning={setPlanning} members={members} days={days} unplanActivity={(id) => planActivity(id, null)} />}
         {tab === "repas" && <Repas meals={meals} setMeals={setMeals} manual={manual} setManual={setManual} checked={checked} setChecked={setChecked}
           assignIng={assignIng} setAssignIng={setAssignIng} me={me} members={members} days={days} />}
@@ -534,13 +617,12 @@ function DeleteBtn({ onConfirm, className, children, title }) {
 }
 
 /* ----------------------------- Activités --------------------------- */
-function Activites({ activities, setActivities, me, members, days, seenAt, saveActivity, planActivity, deleteActivity }) {
+function Activites({ activities, setActivities, me, members, days, seenAt, saveActivity, planActivity, deleteActivity,onToggleVote }) {
   const [adding, setAdding] = useState(false);
   const [editing, setEditing] = useState(null);
   const byId = (id) => members.find((m) => m.id === id) || NOBODY;
 
-  const toggleVote = (id) => setActivities((a) => a.map((x) => x.id === id
-    ? { ...x, votes: x.votes.includes(me) ? x.votes.filter((v) => v !== me) : [...x.votes, me] } : x));
+  const toggleVote = (id) => onToggleVote(id, me);
 
   const save = (act) => { saveActivity(act); setEditing(null); setAdding(false); };
 
