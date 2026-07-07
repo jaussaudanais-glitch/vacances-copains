@@ -420,11 +420,12 @@ function CreateTrip({ onCreate, onCancel }) {
 
 /* ------------------------------ Invite ----------------------------- */
 function Invite({ trip, onEnter, onBack, onSimulateFriend }) {
-  const link = `https://vacances-copains.app/#/join/${trip.inviteCode}`;
+  const link = "https://jaussaudanais-glitch.github.io/vacances-copains/";
+  const shareText = `Rejoins notre voyage « ${trip.name} » sur Vacances des copains :\n${link}\nMot de passe : ${trip.password || "(aucun)"}`;
   const [copied, setCopied] = useState(false);
   const inRef = useRef(null);
   const copy = async () => {
-    try { await navigator.clipboard.writeText(link); setCopied(true); setTimeout(() => setCopied(false), 1800); }
+    try { await navigator.clipboard.writeText(shareText); setCopied(true); setTimeout(() => setCopied(false), 1800); }
     catch (e) {
       if (inRef.current) { inRef.current.select(); try { document.execCommand("copy"); setCopied(true); setTimeout(() => setCopied(false), 1800); } catch (e2) { /* copie manuelle */ } }
     }
@@ -435,15 +436,15 @@ function Invite({ trip, onEnter, onBack, onSimulateFriend }) {
       <div className="vc-topbar"><button className="vc-back" onClick={onBack}><ChevronLeft size={18} /> Accueil</button></div>
       <div className="vc-invite-icon"><Share2 size={24} /></div>
       <h1 className="vc-screen-title">Invite tes copains</h1>
-      <p className="vc-screen-sub">Envoie ce lien au groupe. En l'ouvrant, chacun se connecte et rejoint « {trip.name} ».</p>
+      <p className="vc-screen-sub">Envoie ce lien <b>et le mot de passe</b> au groupe. En ouvrant le lien, chacun se connecte, choisit « {trip.name} » et entre le mot de passe pour rejoindre.</p>
       <div className="vc-linkbox">
         <input ref={inRef} className="vc-in vc-linkinput" readOnly value={link} onFocus={(e) => e.target.select()} />
         <button className="vc-btn vc-btn-green vc-copybtn" onClick={copy}>{copied ? <><Check size={16} /> Copié</> : <><Copy size={16} /> Copier</>}</button>
       </div>
+      <div className="vc-invite-pw">🔑 Mot de passe : <b>{trip.password || "—"}</b></div>
       <div className="vc-invite-meta"><CalendarDays size={13} /> {fmtDateRange(days)} · {trip.members.length} inscrit·s</div>
       <button className="vc-btn vc-invite-enter" onClick={onEnter}>Entrer dans le voyage</button>
       <button className="vc-ghostlink" onClick={onSimulateFriend}><Users size={14} /> Simuler l'arrivée d'un copain</button>
-      <div className="vc-sim-note">Dans l'app réelle, ce lien ouvrira l'écran de connexion. Ici, « simuler » te déconnecte pour tester le parcours d'arrivée d'un invité.</div>
     </div>
   );
 }
@@ -1555,6 +1556,7 @@ const CSS = `
 .vc-linkinput{flex:1;font-size:13px;color:var(--muted);}
 .vc-copybtn{flex:0 0 auto;white-space:nowrap;}
 .vc-invite-meta{font-size:12.5px;color:var(--muted);font-weight:500;margin-bottom:20px;}
+.vc-invite-pw{font-size:13px;color:var(--ink);background:#FBEEDB;border:1px solid #E7C56A;border-radius:9px;padding:8px 11px;margin-bottom:14px;display:inline-block;}
 .vc-invite-enter{width:100%;justify-content:center;padding:13px;font-size:15px;}
 .vc-home-top{display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;}
 .vc-home-hi{display:flex;align-items:center;gap:11px;}
