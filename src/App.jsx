@@ -179,14 +179,38 @@ const updateTrip = (id, fn) => {
   };
   const signIn = (account) => {
     setSession({ uid: account.uid, email: account.email, googleName: account.googleName });
+
+    // 1) Arrivée via un lien de partage (?join=CODE)
+    if (joinCode) {
+      const trip = trips.find((t) => t.inviteCode === joinCode);
+      if (trip) {
+        setActiveId(trip.id);
+        if (trip.members.some((m) => m.id === account.uid)) {
+          setScreen("trip");           // déjà membre → direct dans le voyage
+        } else {
+          setPending(trip.id);         // pas encore membre → mot de passe puis onboarding
+          setScreen("onboarding");
+        }
+        return;
+      }
+    }
+
+    // 2) Cas "pending" classique (déjà géré avant)
     if (pending) {
       const trip = trips.find((t) => t.id === pending);
       if (trip && trip.members.some((m) => m.id === account.uid)) { setActiveId(trip.id); setPending(null); setScreen("trip"); }
-      else if (trip) { setActiveId(trip.id); setScreen("onboarding"); } // pending gardé jusqu'à la fin de l'onboarding
+      else if (trip) { setActiveId(trip.id); setScreen("onboarding"); }
       else { setPending(null); setScreen("home"); }
-    } else setScreen("home");
-  };
+      return;
+    }
 
+    // 3) Connexion normale
+    setScreen("home");
+  };
+// Code du voyage présent dans le lien de partage (?join=XXXX), lu une seule fois au démarrage
+  const [joinCode] = useState(() => {
+    try { return new URLSearchParams(window.location.search).get("join"); } catch (e) { return null; }
+  });
   const signOut = () => { fbSignOut(auth); setActiveId(null); setScreen("login"); };
 
   // Écoute la connexion Google réelle et déclenche la navigation
@@ -220,6 +244,21 @@ const updateTrip = (id, fn) => {
     }, (err) => console.error("Lecture des voyages échouée :", err));
     return () => stop();
   }, []);
+  // Filet de sécurité : si on est arrivé par un lien ?join=CODE, on ouvre le voyage
+  // dès que la liste des voyages est chargée (elle peut arriver après la connexion).
+  useEffect(() => {
+    if (!session || !joinCode) return;
+    if (screen === "trip" || screen === "onboarding") return;
+    const trip = trips.find((t) => t.inviteCode === joinCode);
+    if (!trip) return;
+    setActiveId(trip.id);
+    if (trip.members.some((m) => m.id === session.uid)) {
+      setScreen("trip");
+    } else {
+      setPending(trip.id);
+      setScreen("onboarding");
+    }
+  }, [session, joinCode, trips, screen]);
 
   const googleLogin = async () => {
     try {
@@ -420,8 +459,7 @@ function CreateTrip({ onCreate, onCancel }) {
 
 /* ------------------------------ Invite ----------------------------- */
 function Invite({ trip, onEnter, onBack, onSimulateFriend }) {
-  const link = "https://jaussaudanais-glitch.github.io/vacances-copains/";
-  const shareText = `Rejoins notre voyage « ${trip.name} » sur Vacances des copains :\n${link}\nMot de passe : ${trip.password || "(aucun)"}`;
+const link = `https://jaussaudanais-glitch.github.io/vacances-copains/?join=${trip.inviteCode}`;  const shareText = `Rejoins notre voyage « ${trip.name} » sur Vacances des copains :\n${link}\nMot de passe : ${trip.password || "(aucun)"}`;
   const [copied, setCopied] = useState(false);
   const inRef = useRef(null);
   const copy = async () => {
