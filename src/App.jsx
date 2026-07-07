@@ -8,7 +8,7 @@ import {
 import { auth, googleProvider } from "./firebase";
 import { signInWithPopup, signOut as fbSignOut, onAuthStateChanged } from "firebase/auth";
 import { db } from "./firebase";
-import { collection, doc, setDoc, deleteDoc, onSnapshot, runTransaction } from "firebase/firestore";
+import { collection, doc, setDoc, deleteDoc, updateDoc, onSnapshot, runTransaction } from "firebase/firestore";
 
 /* ------------------------------------------------------------------ *
  * "Vacances des copains" — prototype à données simulées (en mémoire).
@@ -170,9 +170,12 @@ const [trips, setTrips] = useState([]);
   const isMember = (trip) => !!trip && !!session && trip.members.some((m) => m.id === session.uid);
   const canSee = (trip) => isMember(trip) || (!!session && trip.ownerEmail === session.email);
 const updateTrip = (id, fn) => {
-    setTrips((ts) => ts.map((t) => (t.id === id ? fn(t) : t)));
-    const current = trips.find((t) => t.id === id);
-    if (current) setDoc(doc(db, "trips", id), fn(current)).catch((e) => console.error("❌ Sauvegarde échouée :", e));
+    setTrips((ts) => ts.map((t) => {
+      if (t.id !== id) return t;
+      const updated = fn(t);
+      setDoc(doc(db, "trips", id), updated).catch((e) => console.error("Sauvegarde du voyage échouée :", e));
+      return updated;
+    }));
   };
   const signIn = (account) => {
     setSession({ uid: account.uid, email: account.email, googleName: account.googleName });
@@ -227,11 +230,11 @@ const updateTrip = (id, fn) => {
     }
   };
 
-  const createTrip = ({ name, startDate, endDate }) => {
-    const days = buildDays(startDate, endDate);
+const createTrip = ({ name, startDate, endDate, password }) => {
+      const days = buildDays(startDate, endDate);
     const owner = { id: session.uid, email: session.email, name: (acct && acct.googleName) || session.email, color: PALETTE[0], photo: null };
     const trip = {
-      id: rid("trip-"), name, startDate, endDate, ownerEmail: session.email, inviteCode: newCode(), status: "active",
+      id: rid("trip-"), name, startDate, endDate, ownerEmail: session.email, inviteCode: newCode(), status: "active",password,
       tricountUrl: "", members: [owner], planning: emptyPlanning(days), activities: [], meals: emptyMeals(days), manual: [], checked: [], assignIng: {},
     };
     setDoc(doc(db, "trips", trip.id), trip)
@@ -251,10 +254,18 @@ const updateTrip = (id, fn) => {
     setPending(null);
     setScreen(owner && !wasPending ? "invite" : "trip");
   };
-
+// Le mot de passe de ce voyage a-t-il déjà été validé sur cet appareil ? (ou est-on l'admin ?)
+  const pwOk = (trip) => {
+    if (!trip) return false;
+    if (trip.ownerEmail === session?.email) return true;        // l'admin n'a jamais à le taper
+    if (!trip.password) return true;                            // voyage sans mot de passe (anciens voyages)
+    try { return localStorage.getItem("vc-pw-" + trip.id) === "ok"; } catch (e) { return false; }
+  };
   let content;
   if (!session || screen === "login")
     content = <Login pendingTrip={pending ? trips.find((t) => t.id === pending) : null} onSignIn={signIn} onCancelPending={() => setPending(null)} onGoogle={googleLogin} />;
+ else if (screen === "onboarding" && activeTrip && !pwOk(activeTrip))
+    content = <TripPassword trip={activeTrip} onOk={() => setTrips((ts) => [...ts])} onCancel={() => { setScreen("home"); setPending(null); }} />;
   else if (screen === "onboarding" && activeTrip)
     content = <Onboarding trip={activeTrip} account={acct} onDone={completeOnboarding} onCancel={() => { setScreen("home"); setPending(null); }} />;
   else if (screen === "create")
@@ -306,6 +317,35 @@ function Login({ pendingTrip, onSignIn, onCancelPending, onGoogle }) {
     </div>
   );
 }
+function TripPassword({ trip, onOk, onCancel }) {
+  const [pw, setPw] = useState("");
+  const [error, setError] = useState(false);
+  const submit = () => {
+    if (pw.trim() === (trip.password || "")) {
+      try { localStorage.setItem("vc-pw-" + trip.id, "ok"); } catch (e) { /* ignore */ }
+      onOk();
+    } else {
+      setError(true);
+    }
+  };
+  return (
+    <div className="vc-screen vc-ob vc-fade">
+      <div className="vc-ob-head">
+        <div className="vc-ob-eyebrow">Voyage protégé</div>
+        <h1 className="vc-ob-trip">{trip.name}</h1>
+        <div className="vc-ob-dates"><Sun size={13} /> {fmtDateRange(buildDays(trip.startDate, trip.endDate))}</div>
+      </div>
+      <p className="vc-screen-sub" style={{ marginTop: 8 }}>Entre le mot de passe que l'organisateur·rice t'a communiqué pour rejoindre ce voyage.</p>
+      <label className="vc-lbl" style={{ marginTop: 18 }}>Mot de passe</label>
+      <input className="vc-in" value={pw} autoFocus onChange={(e) => { setPw(e.target.value); setError(false); }} onKeyDown={(e) => e.key === "Enter" && submit()} placeholder="Mot de passe du voyage" />
+      {error && <div className="vc-create-warn">Mot de passe incorrect. Réessaie.</div>}
+      <div className="vc-form-actions" style={{ marginTop: 22 }}>
+        <button className="vc-btn-ghost" onClick={onCancel}>Annuler</button>
+        <button className="vc-btn vc-btn-green" onClick={submit}><Check size={16} /> Valider</button>
+      </div>
+    </div>
+  );
+}
 /* --------------------------- Onboarding ---------------------------- */
 function Onboarding({ trip, account, onDone, onCancel }) {
   const existing = trip.members.find((m) => m.email === account.email);
@@ -349,8 +389,9 @@ function CreateTrip({ onCreate, onCancel }) {
   const [name, setName] = useState("");
   const [start, setStart] = useState("");
   const [end, setEnd] = useState("");
+  const [password, setPassword] = useState("");
   const days = start && end ? buildDays(start, end) : [];
-  const valid = name.trim() && days.length > 0;
+  const valid = name.trim() && days.length > 0 && password.trim().length >= 4;
   return (
     <div className="vc-screen vc-create vc-fade">
       <div className="vc-topbar"><button className="vc-back" onClick={onCancel}><ChevronLeft size={18} /> Retour</button></div>
@@ -364,9 +405,14 @@ function CreateTrip({ onCreate, onCancel }) {
       </div>
       {days.length > 0 && <div className="vc-create-hint"><CalendarDays size={13} /> {days.length} jour·s · {fmtDateRange(days)}</div>}
       {start && end && days.length === 0 && <div className="vc-create-warn">La date de fin doit être après le début.</div>}
+      <label className="vc-lbl" style={{ marginTop: 14 }}>Mot de passe du voyage *</label>
+      <input className="vc-in" placeholder="ex : Cassis2026 (au moins 4 caractères)" value={password} onChange={(e) => setPassword(e.target.value)} />
+      <div className="vc-create-hint" style={{ background: "#FBEEDB", color: "#8a6d1b" }}>
+        <AlertTriangle size={13} /> Tu le partageras à tes copains. Note-le : il ne pourra plus être changé.
+      </div>
       <div className="vc-form-actions" style={{ marginTop: 22 }}>
         <button className="vc-btn-ghost" onClick={onCancel}>Annuler</button>
-        <button className="vc-btn vc-btn-green" disabled={!valid} style={{ opacity: valid ? 1 : 0.45 }} onClick={() => valid && onCreate({ name: name.trim(), startDate: start, endDate: end })}><Check size={16} /> Créer le voyage</button>
+        <button className="vc-btn vc-btn-green" disabled={!valid} style={{ opacity: valid ? 1 : 0.45 }} onClick={() => valid && onCreate({ name: name.trim(), startDate: start, endDate: end, password: password.trim() })}><Check size={16} /> Créer le voyage</button>
       </div>
     </div>
   );
@@ -483,6 +529,15 @@ function TripApp({ trip, me, isOwner, update, onExit, onShare }) {
     }, (e) => console.error("Lecture activités échouée :", e));
     return () => stop();
   }, [trip.id]);
+  // Courses en temps réel : cochages, "qui apporte", et articles manuels
+  const [fsChecks, setFsChecks] = useState([]);
+  useEffect(() => {
+    const ref = collection(db, "trips", trip.id, "checks");
+    const stop = onSnapshot(ref, (snap) => {
+      setFsChecks(snap.docs.map((d) => ({ _id: d.id, ...d.data() })));
+    }, (e) => console.error("Lecture courses échouée :", e));
+    return () => stop();
+  }, [trip.id]);
   // Écrit/mets à jour une activité (document séparé)
   const saveActivityFS = (act) => {
     return setDoc(doc(db, "trips", trip.id, "activities", act.id), act)
@@ -516,11 +571,47 @@ function TripApp({ trip, me, isOwner, update, onExit, onShare }) {
   const setPlanning = (v) => update((t) => ({ ...t, planning: apply(v, t.planning) }));
   const setActivities = (v) => update((t) => ({ ...t, activities: apply(v, t.activities) }));
   const setMeals = (v) => update((t) => ({ ...t, meals: apply(v, t.meals) }));
-  const setManual = (v) => update((t) => ({ ...t, manual: apply(v, t.manual) }));
-  const setChecked = (v) => update((t) => ({ ...t, checked: apply(v, t.checked) }));
-  const setAssignIng = (v) => update((t) => ({ ...t, assignIng: apply(v, t.assignIng) }));
+ // --- Écritures Courses dans la sous-collection "checks" ---
+  const checkRef = (id) => doc(db, "trips", trip.id, "checks", id);
 
-const { planning, meals, manual, checked, assignIng } = trip;
+  // Cocher/décocher un ingrédient de repas (id = clé de l'ingrédient, ex "pâtes||grammes")
+  const toggleCheckedFS = (key) => {
+    const existing = fsChecks.find((c) => c._id === key);
+    const done = existing ? !existing.done : true;
+    setDoc(checkRef(key), { manual: false, done, assignedTo: existing ? (existing.assignedTo || null) : null }, { merge: true })
+      .catch((e) => console.error("Cochage échoué :", e));
+  };
+
+  // Qui apporte un ingrédient de repas
+  const assignLineFS = (key, uid) => {
+    setDoc(checkRef(key), { manual: false, assignedTo: uid || null }, { merge: true })
+      .catch((e) => console.error("Assignation échouée :", e));
+  };
+
+  // Articles manuels : ajouter, cocher, supprimer, assigner
+  const addManualFS = (item) => {
+    const id = "x" + Date.now();
+    setDoc(checkRef(id), { manual: true, name: item.name, qty: item.qty, unit: item.unit, done: false, assignedTo: null })
+      .catch((e) => console.error("Ajout article échoué :", e));
+  };
+  const toggleManualFS = (id) => {
+    const existing = fsChecks.find((c) => c._id === id);
+    updateDoc(checkRef(id), { done: existing ? !existing.done : true })
+      .catch((e) => console.error("Cochage article échoué :", e));
+  };
+  const removeManualFS = (id) => {
+    deleteDoc(checkRef(id)).catch((e) => console.error("Suppression article échouée :", e));
+  };
+  const assignManualFS = (id, uid) => {
+    updateDoc(checkRef(id), { assignedTo: uid || null }).catch((e) => console.error("Assignation article échouée :", e));
+  };
+
+const { planning, meals } = trip;
+// Reconstruit checked / assignIng / manual à partir de la sous-collection "checks"
+  const checked = fsChecks.filter((c) => !c.manual && c.done).map((c) => c._id);
+  const assignIng = {};
+  fsChecks.forEach((c) => { if (!c.manual && c.assignedTo) assignIng[c._id] = c.assignedTo; });
+  const manual = fsChecks.filter((c) => c.manual).map((c) => ({ id: c._id, name: c.name, qty: c.qty, unit: c.unit, done: !!c.done, assignedTo: c.assignedTo || null }));
 const activities = fsActivities;
   /* Pont Activités <-> Planning (partants pré-remplis avec les votes) */
   const rebuildLinked = (prev, act) => {
@@ -565,8 +656,9 @@ const activities = fsActivities;
         {tab === "activites" && <Activites activities={activities} setActivities={setActivities} me={me} members={members} days={days} seenAt={seenAt}
           saveActivity={saveActivity} planActivity={planActivity} deleteActivity={deleteActivity} onToggleVote={toggleVoteFS} />}
         {tab === "planning" && <Planning planning={planning} setPlanning={setPlanning} members={members} days={days} unplanActivity={(id) => planActivity(id, null)} />}
-        {tab === "repas" && <Repas meals={meals} setMeals={setMeals} manual={manual} setManual={setManual} checked={checked} setChecked={setChecked}
-          assignIng={assignIng} setAssignIng={setAssignIng} me={me} members={members} days={days} />}
+   {tab === "repas" && <Repas meals={meals} setMeals={setMeals} manual={manual} checked={checked}
+          assignIng={assignIng} me={me} members={members} days={days}
+          fs={{ toggleCheckedFS, assignLineFS, addManualFS, toggleManualFS, removeManualFS, assignManualFS }} />}
         {tab === "depenses" && <Depenses trip={trip} update={update} isOwner={isOwner} />}
       </main>
       <nav className="vc-tabbar">
@@ -885,8 +977,8 @@ function PlanningForm({ initial, onSave, onCancel }) {
 }
 
 /* --------------------------- Repas & Courses ----------------------- */
-function Repas({ meals, setMeals, manual, setManual, checked, setChecked, assignIng, setAssignIng, me, members, days }) {
-  const [view, setView] = useState("repas");
+function Repas({ meals, setMeals, manual, checked, assignIng, me, members, days, fs }) {
+    const [view, setView] = useState("repas");
   const [day, setDay] = useState((days[0] && days[0].key) || "d1");
   const [detail, setDetail] = useState(null);
   const [detailReturn, setDetailReturn] = useState("repas");
@@ -964,8 +1056,8 @@ function Repas({ meals, setMeals, manual, setManual, checked, setChecked, assign
           })}
         </>
       ) : (
-        <Courses shopping={shopping} allDishes={allDishes} checked={checked} setChecked={setChecked} manual={manual} setManual={setManual}
-          members={members} assignIng={assignIng} setAssignIng={setAssignIng} dishDone={dishDone} openDish={openDish} cf={cf} setCf={setCf} />
+        <Courses shopping={shopping} allDishes={allDishes} checked={checked} manual={manual}
+          members={members} assignIng={assignIng} dishDone={dishDone} openDish={openDish} cf={cf} setCf={setCf} fs={fs} />
       )}
     </section>
   );
@@ -993,9 +1085,8 @@ function MealDetail({ day, slot, days, meal, scaled, done, onBack, onEdit }) {
     </section>
   );
 }
-
-function Courses({ shopping, allDishes, checked, setChecked, manual, setManual, members, assignIng, setAssignIng, dishDone, openDish, cf, setCf }) {
-  const { selDishes, selPerson, hideBought } = cf;
+function Courses({ shopping, allDishes, checked, manual, members, assignIng, dishDone, openDish, cf, setCf, fs }) {
+    const { selDishes, selPerson, hideBought } = cf;
   const byId = (id) => members.find((m) => m.id === id) || NOBODY;
   const setSelDishes = (fn) => setCf((c) => ({ ...c, selDishes: typeof fn === "function" ? fn(c.selDishes) : fn }));
   const setSelPerson = (v) => setCf((c) => ({ ...c, selPerson: v }));
@@ -1005,12 +1096,12 @@ function Courses({ shopping, allDishes, checked, setChecked, manual, setManual, 
   const fref = useRef(null);
   useOutside(fref, () => setOpenFilter(false));
 
-  const toggleLine = (key) => setChecked((c) => (c.includes(key) ? c.filter((x) => x !== key) : [...c, key]));
-  const toggleManual = (id) => setManual((m) => m.map((x) => (x.id === id ? { ...x, done: !x.done } : x)));
-  const removeManual = (id) => setManual((m) => m.filter((x) => x.id !== id));
-  const assignLine = (key, uid) => setAssignIng((a) => ({ ...a, [key]: uid }));
-  const assignManual = (id, uid) => setManual((m) => m.map((x) => (x.id === id ? { ...x, assignedTo: uid } : x)));
-  const addManual = () => { if (!draft.name.trim()) return; setManual((m) => [...m, { id: "x" + Date.now(), name: draft.name, qty: num(draft.qty) || 1, unit: draft.unit, done: false, assignedTo: null }]); setDraft({ name: "", qty: "", unit: "pièces" }); };
+  const toggleLine = (key) => fs.toggleCheckedFS(key);
+  const toggleManual = (id) => fs.toggleManualFS(id);
+  const removeManual = (id) => fs.removeManualFS(id);
+  const assignLine = (key, uid) => fs.assignLineFS(key, uid);
+  const assignManual = (id, uid) => fs.assignManualFS(id, uid);
+  const addManual = () => { if (!draft.name.trim()) return; fs.addManualFS({ name: draft.name.trim(), qty: num(draft.qty) || 1, unit: draft.unit }); setDraft({ name: "", qty: "", unit: "pièces" }); };
 
   const dishOptions = allDishes.filter((d) => !(hideBought && dishDone(d)));
   const dishFilter = selDishes.length > 0;
