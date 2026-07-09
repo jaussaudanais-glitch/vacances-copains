@@ -220,30 +220,23 @@ const updateTrip = (id, fn) => {
         signIn({ uid: user.uid, email: user.email, googleName: user.displayName || user.email });
       } else {
         setSession(null);
-      }
-    });
-    return () => stop();
-  }, []);
-// Écoute la connexion Google réelle et déclenche la navigation
-  useEffect(() => {
-    const stop = onAuthStateChanged(auth, (user) => {
-      if (user) {
-        signIn({ uid: user.uid, email: user.email, googleName: user.displayName || user.email });
-      } else {
-        setSession(null);
+        setTrips([]);
       }
     });
     return () => stop();
   }, []);
 
-  // Lit tous les voyages depuis Firestore, en temps réel
+  // Lit tous les voyages depuis Firestore, en temps réel — uniquement une fois
+  // l'utilisateur authentifié (sinon la lecture arrive trop tôt et Firestore
+  // la refuse si les règles exigent request.auth != null, sans jamais réessayer).
   useEffect(() => {
+    if (!session) return;
     const stop = onSnapshot(collection(db, "trips"), (snap) => {
       const list = snap.docs.map((d) => d.data());
       setTrips(list);
     }, (err) => console.error("Lecture des voyages échouée :", err));
     return () => stop();
-  }, []);
+  }, [session && session.uid]);
   // Filet de sécurité : si on est arrivé par un lien ?join=CODE, on ouvre le voyage
   // dès que la liste des voyages est chargée (elle peut arriver après la connexion).
   useEffect(() => {
@@ -694,7 +687,7 @@ const activities = fsActivities;
       <main className="vc-main">
         {tab === "activites" && <Activites activities={activities} setActivities={setActivities} me={me} members={members} days={days} seenAt={seenAt}
           saveActivity={saveActivity} planActivity={planActivity} deleteActivity={deleteActivity} onToggleVote={toggleVoteFS} />}
-        {tab === "planning" && <Planning planning={planning} setPlanning={setPlanning} members={members} days={days} unplanActivity={(id) => planActivity(id, null)} />}
+        {tab === "planning" && <Planning planning={planning} setPlanning={setPlanning} members={members} days={days} activities={activities} saveActivity={saveActivity} unplanActivity={(id) => planActivity(id, null)} />}
    {tab === "repas" && <Repas meals={meals} setMeals={setMeals} manual={manual} checked={checked}
           assignIng={assignIng} me={me} members={members} days={days}
           fs={{ toggleCheckedFS, assignLineFS, addManualFS, toggleManualFS, removeManualFS, assignManualFS }} />}
@@ -866,7 +859,7 @@ function ActivityForm({ initial, days, onSave, onCancel }) {
       <label className="vc-lbl" style={{ marginTop: 14 }}>Moment privilégié</label>
       <div className="vc-chiprow">{MOMENTS.map((m) => <button key={m.id} className={"vc-tag" + (moment === m.id ? " is-on" : "")} onClick={() => setMoment(m.id)}>{m.label}</button>)}</div>
       <label className="vc-lbl" style={{ marginTop: 14 }}>Commentaire</label>
-      <input className="vc-in" placeholder="Note (optionnel)" value={note} onChange={(e) => setNote(e.target.value)} />
+      <input className="vc-in" placeholder="Commentaire (optionnel)" value={note} onChange={(e) => setNote(e.target.value)} />
       <label className="vc-lbl" style={{ marginTop: 14 }}>Créneau planifié</label>
       <div className="vc-chiprow">
         <button className={"vc-tag" + (!slotDay ? " is-on" : "")} onClick={() => { setSlotDay(""); setSlotPart(""); }}>Non planifié</button>
@@ -882,16 +875,29 @@ function ActivityForm({ initial, days, onSave, onCancel }) {
 }
 
 /* ----------------------------- Planning ---------------------------- */
-function Planning({ planning, setPlanning, members, days, unplanActivity }) {
+function Planning({ planning, setPlanning, members, days, activities, saveActivity, unplanActivity }) {
   const [mode, setMode] = useState("day");
   const [day, setDay] = useState((days[0] && days[0].key) || "d1");
   const [editing, setEditing] = useState(null);
+
+  const noteFor = (a) => {
+    if (a.fromActivity) { const linked = activities.find((x) => x.id === a.fromActivity); if (linked) return linked.note || ""; }
+    return a.note || "";
+  };
 
   const items = [...(planning[day] || [])].sort((a, b) => a.time.localeCompare(b.time));
   const toggleWho = (id, uid) => setPlanning((p) => ({ ...p, [day]: p[day].map((a) => (a.id === id ? { ...a, who: a.who.includes(uid) ? a.who.filter((x) => x !== uid) : [...a.who, uid] } : a)) }));
   const confirm = (id) => setPlanning((p) => ({ ...p, [day]: p[day].map((a) => (a.id === id ? { ...a, status: a.status === "idea" ? "confirmed" : "idea" } : a)) }));
   const removeItem = (a) => { if (a.fromActivity) unplanActivity(a.fromActivity); else setPlanning((p) => ({ ...p, [day]: p[day].filter((x) => x.id !== a.id) })); };
-  const saveAct = (act) => { setPlanning((p) => ({ ...p, [day]: p[day].map((a) => (a.id === act.id ? act : a)) })); setEditing(null); };
+  const saveAct = (act) => {
+    const { note, ...planningFields } = act;
+    setPlanning((p) => ({ ...p, [day]: p[day].map((a) => (a.id === act.id ? planningFields : a)) }));
+    if (act.fromActivity) {
+      const linked = activities.find((x) => x.id === act.fromActivity);
+      if (linked) saveActivity({ ...linked, note: (note || "").trim() });
+    }
+    setEditing(null);
+  };
   const openEvent = (dayK, act) => { setDay(dayK); setMode("day"); setEditing(act); };
 
   return (
@@ -907,7 +913,7 @@ function Planning({ planning, setPlanning, members, days, unplanActivity }) {
           {items.length === 0 && !editing && <Empty text="Les activités planifiées depuis l'onglet Activités apparaîtront ici." />}
           <div className="vc-list">
             {items.map((a) => (editing && editing.id === a.id) ? (
-              <PlanningForm key={a.id} initial={a} onSave={saveAct} onCancel={() => setEditing(null)} />
+              <PlanningForm key={a.id} initial={{ ...a, note: noteFor(a) }} onSave={saveAct} onCancel={() => setEditing(null)} />
             ) : (
               <article key={a.id} className={"vc-card" + (a.status === "idea" ? " is-idea" : "")}>
                 <div className="vc-card-top">
@@ -921,6 +927,7 @@ function Planning({ planning, setPlanning, members, days, unplanActivity }) {
                 <button className="vc-card-clik" onClick={() => setEditing(a)}>
                   <h3 className="vc-card-title">{a.title}{a.fromActivity && <span className="vc-fromact"><Compass size={11} /> activité</span>}</h3>
                   {a.place && <div className="vc-card-place"><MapPin size={12} /> {a.place}</div>}
+                  {noteFor(a) && <div className="vc-actnote">{noteFor(a)}</div>}
                 </button>
                 <div className="vc-who">
                   {members.map((p) => { const on = a.who.includes(p.id);
@@ -998,7 +1005,8 @@ function PlanningForm({ initial, onSave, onCancel }) {
   const [dur, setDur] = useState((initial && initial.dur) || 60);
   const [title, setTitle] = useState((initial && initial.title) || "");
   const [place, setPlace] = useState((initial && initial.place) || "");
-  const save = () => { if (!title.trim()) return; onSave({ ...(initial || {}), time: time || "12:00", dur: num(dur) || 60, title: title.trim(), place: place.trim() }); };
+  const [note, setNote] = useState((initial && initial.note) || "");
+  const save = () => { if (!title.trim()) return; onSave({ ...(initial || {}), time: time || "12:00", dur: num(dur) || 60, title: title.trim(), place: place.trim(), note: note.trim() }); };
   return (
     <div className="vc-form">
       <div className="vc-form-row">
@@ -1007,6 +1015,8 @@ function PlanningForm({ initial, onSave, onCancel }) {
       </div>
       <input className="vc-in" placeholder="Activité" value={title} onChange={(e) => setTitle(e.target.value)} autoFocus />
       <input className="vc-in" placeholder="Lieu (optionnel)" value={place} onChange={(e) => setPlace(e.target.value)} />
+      <input className="vc-in" placeholder="Commentaire (optionnel)" value={note} onChange={(e) => setNote(e.target.value)} />
+      {initial && initial.fromActivity && <div className="vc-notehint">Ce commentaire est partagé avec l'onglet Activités.</div>}
       <div className="vc-form-actions">
         <button className="vc-btn-ghost" onClick={onCancel}><X size={16} /> Annuler</button>
         <button className="vc-btn vc-btn-green" onClick={save}><Check size={16} /> {initial ? "Valider" : "Ajouter"}</button>
@@ -1325,7 +1335,11 @@ const CSS = `
 @import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700&family=Inter:wght@400;500;600;700&display=swap');
 .vc-root{--paper:#FAF4E8;--ink:#22304A;--muted:#8C8471;--line:#EADFC8;--sun:#FFC531;--sea:#2FA69A;--card:#FFFCF5;--red:#C0492E;--shadow:0 2px 0 rgba(34,48,74,.05),0 8px 24px -12px rgba(34,48,74,.25);font-family:'Inter',system-ui,sans-serif;color:var(--ink);display:flex;justify-content:center;padding:20px 12px;background:radial-gradient(120% 60% at 50% -10%,#FFF4D6 0%,transparent 60%),var(--paper);min-height:100%;}
 .vc-root *{box-sizing:border-box;}
-.vc-phone{width:100%;max-width:400px;background:var(--paper);border:1px solid var(--line);border-radius:26px;overflow:hidden;box-shadow:var(--shadow);display:flex;flex-direction:column;min-height:790px;position:relative;}
+.vc-phone{width:100%;max-width:400px;background:var(--paper);border:1px solid var(--line);border-radius:26px;overflow:hidden;box-shadow:var(--shadow);display:flex;flex-direction:column;height:calc(100dvh - 40px);max-height:900px;position:relative;}
+@media (max-width:480px){
+  .vc-root{padding:0;}
+  .vc-phone{max-width:none;height:100dvh;max-height:none;border-radius:0;border:none;box-shadow:none;}
+}
 .vc-header{padding:16px 20px 18px;background:linear-gradient(180deg,#FFE7A8 0%,var(--paper) 100%);border-bottom:1px solid var(--line);}
 .vc-stamp{display:inline-flex;align-items:center;gap:5px;font-weight:700;font-size:11px;letter-spacing:.14em;color:#B8860B;border:1.5px solid #E7C56A;border-radius:6px;padding:3px 8px;transform:rotate(-2deg);background:#FFF6DC;}
 .vc-title{font-family:'Fraunces',serif;font-weight:600;font-size:30px;line-height:1.04;margin:12px 0 6px;letter-spacing:-.01em;}
@@ -1335,7 +1349,7 @@ const CSS = `
 .vc-avatars .vc-av:first-child{margin-left:0;}
 .vc-av-img{object-fit:cover;}
 .vc-av-xs{width:20px;height:20px;font-size:9px;margin-left:0;border-width:1.5px;}
-.vc-main{flex:1;overflow-y:auto;padding:16px 16px 92px;}
+.vc-main{flex:1;min-height:0;overflow-y:auto;padding:16px 16px 20px;}
 .vc-fade{animation:vcfade .28s ease;}
 @keyframes vcfade{from{opacity:0;transform:translateY(6px);}to{opacity:1;transform:none;}}
 .vc-daystrip{display:flex;gap:7px;overflow-x:auto;padding-bottom:4px;margin-bottom:14px;scrollbar-width:none;}
@@ -1416,6 +1430,7 @@ const CSS = `
 .vc-slotbadge{display:inline-flex;align-items:center;gap:4px;font-size:11px;font-weight:600;color:#1E6F8A;background:#E1F0F5;padding:3px 9px;border-radius:20px;}
 .vc-conflict{display:inline-flex;align-items:center;gap:4px;font-size:11px;font-weight:700;color:#fff;background:var(--red);padding:3px 9px;border-radius:20px;}
 .vc-actnote{font-size:12.5px;color:var(--muted);margin-top:8px;}
+.vc-notehint{font-size:11px;color:var(--sea);font-style:italic;margin-top:-2px;}
 .vc-actfoot{display:flex;align-items:center;justify-content:space-between;margin-top:11px;gap:8px;}
 .vc-votes{display:flex;align-items:center;gap:8px;}
 .vc-votebtn{display:inline-flex;align-items:center;gap:5px;border:1px solid var(--line);background:transparent;color:var(--muted);border-radius:20px;padding:5px 11px;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit;}
@@ -1544,7 +1559,7 @@ const CSS = `
 .vc-dep-edit{display:flex;flex-direction:column;gap:10px;margin-top:4px;}
 .vc-dep-edit .vc-btn{justify-content:center;}
 .vc-empty{text-align:center;color:var(--muted);font-size:14px;padding:26px 10px;font-style:italic;}
-.vc-tabbar{position:absolute;bottom:0;left:0;right:0;display:flex;background:var(--card);border-top:1px solid var(--line);padding:8px 4px calc(8px + env(safe-area-inset-bottom));}
+.vc-tabbar{flex:0 0 auto;display:flex;background:var(--card);border-top:1px solid var(--line);padding:8px 4px calc(8px + env(safe-area-inset-bottom));}
 .vc-tab{flex:1;border:none;background:transparent;color:var(--muted);display:flex;flex-direction:column;align-items:center;gap:3px;padding:6px 2px;font-size:10.5px;font-weight:600;cursor:pointer;font-family:inherit;border-radius:12px;transition:.15s;}
 .vc-tab.is-on{color:var(--ink);}
 .vc-tab.is-on svg{color:var(--sea);}
@@ -1552,7 +1567,7 @@ const CSS = `
 .vc-acct .vc-av,.vc-home-hi .vc-av,.vc-ob-preview .vc-av{margin-left:0;}
 .vc-tripcard-members .vc-av{margin-left:-7px;}
 .vc-tripcard-members .vc-av:first-child{margin-left:0;}
-.vc-screen{flex:1;display:flex;flex-direction:column;padding:26px 20px 30px;}
+.vc-screen{flex:1;min-height:0;display:flex;flex-direction:column;padding:26px 20px 30px;overflow-y:auto;}
 .vc-screen-title{font-family:'Fraunces',serif;font-size:26px;font-weight:600;margin:0 0 6px;letter-spacing:-.01em;}
 .vc-screen-sub{font-size:14px;line-height:1.5;color:var(--muted);margin:0;}
 .vc-topbar{display:flex;justify-content:space-between;align-items:center;margin-bottom:18px;}
